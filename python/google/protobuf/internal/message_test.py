@@ -36,7 +36,6 @@ from google.protobuf.internal import enum_type_wrapper
 from google.protobuf.internal import more_extensions_pb2
 from google.protobuf.internal import more_messages_pb2
 from google.protobuf.internal import packed_field_test_pb2
-from google.protobuf.internal import self_recursive_pb2
 from google.protobuf.internal import test_proto3_optional_pb2
 from google.protobuf.internal import test_util
 from google.protobuf.internal import testing_refleaks
@@ -1432,52 +1431,6 @@ class MessageTest(unittest.TestCase):
     )
 
 
-@testing_refleaks.TestCase
-class TestRecursiveGroup(unittest.TestCase):
-
-  def _MakeRecursiveGroupMessage(self, n):
-    msg = self_recursive_pb2.SelfRecursive()
-    sub = msg
-    for _ in range(n):
-      sub = sub.sub_group
-    sub.i = 1
-    return msg.SerializeToString()
-
-  def testRecursiveGroups(self):
-    recurse_msg = self_recursive_pb2.SelfRecursive()
-    data = self._MakeRecursiveGroupMessage(100)
-    recurse_msg.ParseFromString(data)
-    self.assertTrue(recurse_msg.HasField('sub_group'))
-
-  def testRecursiveGroupsException(self):
-    if api_implementation.Type() != 'python':
-      api_implementation._c_module.SetAllowOversizeProtos(False)
-    recurse_msg = self_recursive_pb2.SelfRecursive()
-    data = self._MakeRecursiveGroupMessage(300)
-    with self.assertRaises(message.DecodeError) as context:
-      recurse_msg.ParseFromString(data)
-    self.assertIn('Error parsing message', str(context.exception))
-    if api_implementation.Type() == 'python':
-      self.assertIn('too many levels of nesting', str(context.exception))
-
-  def testRecursiveGroupsUnknownFields(self):
-    if api_implementation.Type() != 'python':
-      api_implementation._c_module.SetAllowOversizeProtos(False)
-    test_msg = unittest_pb2.TestAllTypes()
-    data = self._MakeRecursiveGroupMessage(300)  # unknown to test_msg
-    with self.assertRaises(message.DecodeError) as context:
-      test_msg.ParseFromString(data)
-    self.assertIn(
-        'Error parsing message',
-        str(context.exception),
-    )
-    if api_implementation.Type() == 'python':
-      self.assertIn('too many levels of nesting', str(context.exception))
-      decoder.SetRecursionLimit(310)
-      test_msg.ParseFromString(data)
-      decoder.SetRecursionLimit(decoder.DEFAULT_RECURSION_LIMIT)
-
-
 # Class to test proto2-only features (required, extensions, etc.)
 @testing_refleaks.TestCase
 class Proto2Test(unittest.TestCase):
@@ -1894,6 +1847,79 @@ class Proto3Test(unittest.TestCase):
     self.assertEqual(len(message_proto3.ListFields()), 5)
     self.assertEqual(message_proto3.SerializeToString(), serialized)
 
+  def testProto3Optional(self):
+    msg = test_proto3_optional_pb2.TestProto3Optional()
+    self.assertFalse(msg.HasField('optional_int32'))
+    self.assertFalse(msg.HasField('optional_float'))
+    self.assertFalse(msg.HasField('optional_string'))
+    self.assertFalse(msg.HasField('optional_nested_message'))
+    self.assertFalse(msg.optional_nested_message.HasField('bb'))
+
+    # Set fields.
+    msg.optional_int32 = 1
+    msg.optional_float = 1.0
+    msg.optional_string = '123'
+    msg.optional_nested_message.bb = 1
+    self.assertTrue(msg.HasField('optional_int32'))
+    self.assertTrue(msg.HasField('optional_float'))
+    self.assertTrue(msg.HasField('optional_string'))
+    self.assertTrue(msg.HasField('optional_nested_message'))
+    self.assertTrue(msg.optional_nested_message.HasField('bb'))
+    # Set to default value does not clear the fields
+    msg.optional_int32 = 0
+    msg.optional_float = 0.0
+    msg.optional_string = ''
+    msg.optional_nested_message.bb = 0
+    self.assertTrue(msg.HasField('optional_int32'))
+    self.assertTrue(msg.HasField('optional_float'))
+    self.assertTrue(msg.HasField('optional_string'))
+    self.assertTrue(msg.HasField('optional_nested_message'))
+    self.assertTrue(msg.optional_nested_message.HasField('bb'))
+
+    # Test serialize
+    msg2 = test_proto3_optional_pb2.TestProto3Optional()
+    msg2.ParseFromString(msg.SerializeToString())
+    self.assertTrue(msg2.HasField('optional_int32'))
+    self.assertTrue(msg2.HasField('optional_float'))
+    self.assertTrue(msg2.HasField('optional_string'))
+    self.assertTrue(msg2.HasField('optional_nested_message'))
+    self.assertTrue(msg2.optional_nested_message.HasField('bb'))
+
+    self.assertEqual(msg.WhichOneof('_optional_int32'), 'optional_int32')
+
+    # Clear these fields.
+    msg.ClearField('optional_int32')
+    msg.ClearField('optional_float')
+    msg.ClearField('optional_string')
+    msg.ClearField('optional_nested_message')
+    self.assertFalse(msg.HasField('optional_int32'))
+    self.assertFalse(msg.HasField('optional_float'))
+    self.assertFalse(msg.HasField('optional_string'))
+    self.assertFalse(msg.HasField('optional_nested_message'))
+    self.assertFalse(msg.optional_nested_message.HasField('bb'))
+
+    self.assertEqual(msg.WhichOneof('_optional_int32'), None)
+
+    # Test has presence:
+    for field in test_proto3_optional_pb2.TestProto3Optional.DESCRIPTOR.fields:
+      if field.name.startswith('optional_'):
+        self.assertTrue(field.has_presence)
+    for field in unittest_pb2.TestAllTypes.DESCRIPTOR.fields:
+      if field.is_repeated:
+        self.assertFalse(field.has_presence)
+      else:
+        self.assertTrue(field.has_presence)
+    proto3_descriptor = unittest_proto3_arena_pb2.TestAllTypes.DESCRIPTOR
+    repeated_field = proto3_descriptor.fields_by_name['repeated_int32']
+    self.assertFalse(repeated_field.has_presence)
+    singular_field = proto3_descriptor.fields_by_name['optional_int32']
+    self.assertFalse(singular_field.has_presence)
+    optional_field = proto3_descriptor.fields_by_name['proto3_optional_int32']
+    self.assertTrue(optional_field.has_presence)
+    message_field = proto3_descriptor.fields_by_name['optional_nested_message']
+    self.assertTrue(message_field.has_presence)
+    oneof_field = proto3_descriptor.fields_by_name['oneof_uint32']
+    self.assertTrue(oneof_field.has_presence)
 
   def testAssignUnknownEnum(self):
     """Assigning an unknown enum value is allowed and preserves the value."""
@@ -2673,6 +2699,20 @@ class Proto3Test(unittest.TestCase):
     msg.map_string_foreign_message['foo'].c = 5
     self.assertEqual(0, len(msg.FindInitializationErrors()))
 
+  def testMapStubReferenceSubMessageDestructor(self):
+    msg = map_unittest_pb2.TestMapSubmessage()
+    # A reference on map stub in sub message
+    map_ref = msg.test_map.map_int32_int32
+    # Make sure destructor after Clear the original message not crash
+    msg.Clear()
+
+  def testRepeatedStubReferenceSubMessageDestructor(self):
+    msg = unittest_pb2.NestedTestAllTypes()
+    # A reference on repeated stub in sub message
+    repeated_ref = msg.payload.repeated_int32
+    # Make sure destructor after Clear the original message not crash
+    msg.Clear()
+
   @unittest.skipIf(sys.maxunicode == UCS2_MAXUNICODE, 'Skip for ucs2')
   def testStrictUtf8Check(self):
     # Test u'\ud801' is rejected at parser in both python2 and python3.
@@ -2833,6 +2873,34 @@ class PackedFieldTest(unittest.TestCase):
     self.assertEqual(golden_data, message.SerializeToString())
 
 
+@unittest.skipIf(api_implementation.Type() == 'python',
+                 'explicit tests of the C++ implementation')
+@testing_refleaks.TestCase
+class OversizeProtosTest(unittest.TestCase):
+
+  def GenerateNestedProto(self, n):
+    msg = unittest_pb2.TestRecursiveMessage()
+    sub = msg
+    for _ in range(n):
+      sub = sub.a
+    sub.i = 0
+    return msg.SerializeToString()
+
+  def testSucceedOkSizedProto(self):
+    msg = unittest_pb2.TestRecursiveMessage()
+    msg.ParseFromString(self.GenerateNestedProto(100))
+
+  def testAssertOversizeProto(self):
+    api_implementation._c_module.SetAllowOversizeProtos(False)
+    msg = unittest_pb2.TestRecursiveMessage()
+    with self.assertRaises(message.DecodeError) as context:
+      msg.ParseFromString(self.GenerateNestedProto(101))
+    self.assertIn('Error parsing message', str(context.exception))
+
+  def testSucceedOversizeProto(self):
+    api_implementation._c_module.SetAllowOversizeProtos(True)
+    msg = unittest_pb2.TestRecursiveMessage()
+    msg.ParseFromString(self.GenerateNestedProto(101))
 
 
 if __name__ == '__main__':
